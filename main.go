@@ -17,9 +17,8 @@ import (
 	"time"
 )
 
-// Application represents the main application structure.
 type Application struct {
-	conf          *config
+	config        *config
 	httpTransport *http.Transport
 	logger        *slog.Logger
 	sshProcess    *exec.Cmd
@@ -29,20 +28,20 @@ type Application struct {
 
 func main() {
 	// Initialize configuration
-	conf, err := newConfigFromEnv()
+	config, err := newConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
+		slog.Error("Failed to load configuration", "error", err)
 		os.Exit(1)
 	}
 
 	// Initialize application
 	app := &Application{
-		conf:         conf,
+		config:       config,
 		shutdownChan: make(chan struct{}),
 	}
 
 	if err := app.initialize(); err != nil {
-		fmt.Fprintf(os.Stderr, "Initialization failed: %v\n", err)
+		slog.Error("Initialization failed", "error", err)
 		os.Exit(1)
 	}
 	defer app.cleanup()
@@ -76,7 +75,7 @@ func (app *Application) initialize() error {
 
 // createLogger initializes the application logger.
 func (app *Application) createLogger() (*slog.Logger, error) {
-	file, err := os.OpenFile(app.conf.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(app.config.logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
@@ -89,11 +88,11 @@ func (app *Application) createLogger() (*slog.Logger, error) {
 // createHTTPTransport creates a configured HTTP transport.
 func (app *Application) createHTTPTransport() *http.Transport {
 	dialFunc := func(network, addr string) (net.Conn, error) {
-		return net.Dial("tcp", app.conf.ProxyHost)
+		return net.Dial("tcp", app.config.proxyHost)
 	}
 
 	proxyFunc := func(r *http.Request) (*url.URL, error) {
-		proxyURL := fmt.Sprintf("socks5://%s", app.conf.ProxyHost)
+		proxyURL := fmt.Sprintf("socks5://%s", app.config.proxyHost)
 		return url.Parse(proxyURL)
 	}
 
@@ -120,7 +119,7 @@ func (app *Application) setupSignalHandler() {
 func (app *Application) run() {
 	app.logger.Info("Starting SSH tunnel application")
 
-	ticker := time.NewTicker(app.conf.MainLoopSleep)
+	ticker := time.NewTicker(app.config.mainLoopSleep)
 	defer ticker.Stop()
 
 	for {
@@ -173,9 +172,9 @@ func (app *Application) checkTraffic() bool {
 
 // checkPort verifies if the proxy port is available.
 func (app *Application) checkPort() bool {
-	conn, err := net.DialTimeout("tcp", app.conf.ProxyHost, app.conf.PortCheckTimeout)
+	conn, err := net.DialTimeout("tcp", app.config.proxyHost, app.config.portCheckTimeout)
 	if err != nil {
-		app.logger.Error("Proxy port unavailable", "host", app.conf.ProxyHost, "error", err)
+		app.logger.Error("Proxy port unavailable", "host", app.config.proxyHost, "error", err)
 		return false
 	}
 	conn.Close()
@@ -193,7 +192,7 @@ func (app *Application) startSSH() error {
 	}
 
 	app.logger.Info("Starting SSH process")
-	cmd := exec.Command("ssh", app.conf.serializeSSHOptions()...)
+	cmd := exec.Command("ssh", app.config.serializeSSHOptions()...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -218,7 +217,7 @@ func (app *Application) isProcessRunning(cmd *exec.Cmd) bool {
 
 // waitForTunnelReady waits for the tunnel to become available.
 func (app *Application) waitForTunnelReady() bool {
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if app.checkPort() {
 			app.logger.Info("SSH tunnel is ready")
 			return true
@@ -255,8 +254,8 @@ func (app *Application) stopSSH() {
 
 // createPIDFile creates the PID file.
 func (app *Application) createPIDFile() error {
-	if _, err := os.Stat(app.conf.PIDFile); err == nil {
-		content, err := os.ReadFile(app.conf.PIDFile)
+	if _, err := os.Stat(app.config.pidFile); err == nil {
+		content, err := os.ReadFile(app.config.pidFile)
 		if err != nil {
 			return fmt.Errorf("failed to read PID file: %w", err)
 		}
@@ -272,17 +271,17 @@ func (app *Application) createPIDFile() error {
 			}
 		}
 
-		os.Remove(app.conf.PIDFile)
+		os.Remove(app.config.pidFile)
 	}
 
-	return os.WriteFile(app.conf.PIDFile, []byte(strconv.Itoa(os.Getpid())), 0644)
+	return os.WriteFile(app.config.pidFile, []byte(strconv.Itoa(os.Getpid())), 0644)
 }
 
 // cleanup performs application cleanup tasks.
 func (app *Application) cleanup() {
 	app.stopSSH()
 
-	if err := os.Remove(app.conf.PIDFile); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(app.config.pidFile); err != nil && !os.IsNotExist(err) {
 		app.logger.Error("Failed to remove PID file", "error", err)
 	}
 
