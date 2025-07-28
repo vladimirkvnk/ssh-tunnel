@@ -1,3 +1,4 @@
 ssh-tunnel
-ssh-tunnel.log
-ssh-tunnel.pid
+*.log
+*.pid
+.zed/

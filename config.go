@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"time"
 
@@ -58,6 +59,57 @@ func (c *config) validate() error {
 	}
 
 	return nil
+}
+
+// getPortSpecificPIDFile returns a PID file name that includes the proxy port
+// to allow multiple instances running on different ports
+func (c *config) getPortSpecificPIDFile() string {
+	// Extract port from ProxyHost (format: "host:port")
+	_, port, err := net.SplitHostPort(c.ProxyHost)
+	if err != nil {
+		// Fallback to original PID file if parsing fails
+		return c.PIDFile
+	}
+	
+	// Create port-specific PID file name
+	// e.g., "ssh-tunnel.pid" becomes "ssh-tunnel-8080.pid"
+	if c.PIDFile == "ssh-tunnel.pid" {
+		return fmt.Sprintf("ssh-tunnel-%s.pid", port)
+	}
+	
+	// For custom PID file names, insert port before extension
+	if len(c.PIDFile) > 4 && c.PIDFile[len(c.PIDFile)-4:] == ".pid" {
+		base := c.PIDFile[:len(c.PIDFile)-4]
+		return fmt.Sprintf("%s-%s.pid", base, port)
+	}
+	
+	// Fallback: append port to filename
+	return fmt.Sprintf("%s-%s", c.PIDFile, port)
+}
+
+// getPortSpecificLogFile returns a log file name that includes the proxy port
+func (c *config) getPortSpecificLogFile() string {
+	// Extract port from ProxyHost (format: "host:port")
+	_, port, err := net.SplitHostPort(c.ProxyHost)
+	if err != nil {
+		// Fallback to original log file if parsing fails
+		return c.LogFile
+	}
+	
+	// Create port-specific log file name
+	// e.g., "ssh-tunnel.log" becomes "ssh-tunnel-8080.log"
+	if c.LogFile == "ssh-tunnel.log" {
+		return fmt.Sprintf("ssh-tunnel-%s.log", port)
+	}
+	
+	// For custom log file names, insert port before extension
+	if len(c.LogFile) > 4 && c.LogFile[len(c.LogFile)-4:] == ".log" {
+		base := c.LogFile[:len(c.LogFile)-4]
+		return fmt.Sprintf("%s-%s.log", base, port)
+	}
+	
+	// Fallback: append port to filename
+	return fmt.Sprintf("%s-%s", c.LogFile, port)
 }
 
 func (c *config) serializeSSHOptions() []string {
