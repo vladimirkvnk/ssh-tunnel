@@ -13,6 +13,7 @@ A robust SSH tunnel manager that maintains a persistent SOCKS5 proxy connection 
 - ⚡ Graceful shutdown handling
 - 🔧 Configurable via environment variables
 - 📊 Structured JSON logging
+- 🚀 **Multi-instance support** - Run multiple tunnels on different ports simultaneously
 
 ## How It Works
 
@@ -87,6 +88,41 @@ export SSH_TUNNEL_REMOTE_PORT=2222
 export SSH_TUNNEL_BIND_HOST=127.0.0.1:9090
 export SSH_TUNNEL_MAIN_LOOP_SLEEP_SEC=30
 ```
+
+## Running Multiple Instances
+
+The application supports running multiple instances simultaneously on different ports. Each instance automatically creates port-specific PID and log files to avoid conflicts.
+
+### Multi-Instance Example
+
+**Terminal 1 - Instance on port 8080:**
+```bash
+export SSH_TUNNEL_REMOTE_ADDRESS=user@example.com
+export SSH_TUNNEL_HOST=localhost:8080
+export SSH_TUNNEL_BIND_HOST=0.0.0.0:8080
+./ssh-tunnel
+```
+
+**Terminal 2 - Instance on port 9090:**
+```bash
+export SSH_TUNNEL_REMOTE_ADDRESS=user@example.com
+export SSH_TUNNEL_HOST=localhost:9090
+export SSH_TUNNEL_BIND_HOST=0.0.0.0:9090
+./ssh-tunnel
+```
+
+### Port-Specific Files
+
+When running multiple instances, the application automatically creates port-specific files:
+
+- **PID Files**: `ssh-tunnel-8080.pid`, `ssh-tunnel-9090.pid`
+- **Log Files**: `ssh-tunnel-8080.log`, `ssh-tunnel-9090.log`
+
+This allows each instance to:
+- Track its own process independently
+- Maintain separate logs for easier debugging
+- Prevent conflicts between instances
+- Allow graceful shutdown of individual instances
 
 ## Running as a Service
 

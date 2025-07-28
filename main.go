@@ -75,7 +75,8 @@ func (app *Application) initialize() error {
 
 // createLogger initializes the application logger.
 func (app *Application) createLogger() (*slog.Logger, error) {
-	file, err := os.OpenFile(app.config.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	logFile := app.config.getPortSpecificLogFile()
+	file, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
@@ -254,8 +255,10 @@ func (app *Application) stopSSH() {
 
 // createPIDFile creates the PID file.
 func (app *Application) createPIDFile() error {
-	if _, err := os.Stat(app.config.PIDFile); err == nil {
-		content, err := os.ReadFile(app.config.PIDFile)
+	pidFile := app.config.getPortSpecificPIDFile()
+	
+	if _, err := os.Stat(pidFile); err == nil {
+		content, err := os.ReadFile(pidFile)
 		if err != nil {
 			return fmt.Errorf("failed to read PID file: %w", err)
 		}
@@ -267,21 +270,23 @@ func (app *Application) createPIDFile() error {
 
 		if process, err := os.FindProcess(pid); err == nil {
 			if err = process.Signal(syscall.Signal(0)); err == nil {
-				return fmt.Errorf("another instance is already running with PID %d", pid)
+				_, port, _ := net.SplitHostPort(app.config.ProxyHost)
+				return fmt.Errorf("another instance is already running on port %s with PID %d", port, pid)
 			}
 		}
 
-		os.Remove(app.config.PIDFile)
+		os.Remove(pidFile)
 	}
 
-	return os.WriteFile(app.config.PIDFile, []byte(strconv.Itoa(os.Getpid())), 0644)
+	return os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0644)
 }
 
 // cleanup performs application cleanup tasks.
 func (app *Application) cleanup() {
 	app.stopSSH()
 
-	if err := os.Remove(app.config.PIDFile); err != nil && !os.IsNotExist(err) {
+	pidFile := app.config.getPortSpecificPIDFile()
+	if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
 		app.logger.Error("Failed to remove PID file", "error", err)
 	}
 
