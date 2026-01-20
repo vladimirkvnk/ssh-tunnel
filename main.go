@@ -2,12 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -15,12 +16,15 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 type Application struct {
 	config        *config
 	httpTransport *http.Transport
 	logger        *slog.Logger
+	logFile       *os.File
 	sshProcess    *exec.Cmd
 	sshMutex      sync.RWMutex
 	shutdownChan  chan struct{}
@@ -65,7 +69,11 @@ func (app *Application) initialize() error {
 	}
 
 	// Setup HTTP transport
-	app.httpTransport = app.createHTTPTransport()
+	transport, err := app.createHTTPTransport()
+	if err != nil {
+		return fmt.Errorf("http transport initialization failed: %w", err)
+	}
+	app.httpTransport = transport
 
 	// Setup signal handling
 	app.setupSignalHandler()
@@ -80,28 +88,91 @@ func (app *Application) createLogger() (*slog.Logger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
+	app.logFile = file
 
-	return slog.New(slog.NewJSONHandler(file, &slog.HandlerOptions{
+	var out io.Writer = file
+	if app.config.LogStdout {
+		out = io.MultiWriter(file, os.Stdout)
+	}
+
+	return slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	})), nil
 }
 
 // createHTTPTransport creates a configured HTTP transport.
-func (app *Application) createHTTPTransport() *http.Transport {
-	dialFunc := func(network, addr string) (net.Conn, error) {
-		return net.Dial("tcp", app.config.ProxyHost)
+func (app *Application) createHTTPTransport() (*http.Transport, error) {
+	dialer, err := proxy.SOCKS5("tcp", app.config.proxyHost, nil, &net.Dialer{
+		Timeout: app.config.PortCheckTimeout,
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	proxyFunc := func(r *http.Request) (*url.URL, error) {
-		proxyURL := fmt.Sprintf("socks5://%s", app.config.ProxyHost)
-		return url.Parse(proxyURL)
-	}
+	dialContext := app.makeSocksDialContext(dialer)
 
 	return &http.Transport{
-		Dial:            dialFunc,
+		DialContext:     dialContext,
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		Proxy:           proxyFunc,
+	}, nil
+}
+
+func (app *Application) makeSocksDialContext(dialer proxy.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	var contextDialer proxy.ContextDialer
+	if cd, ok := dialer.(proxy.ContextDialer); ok {
+		contextDialer = cd
 	}
+
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		targetAddr := addr
+		if app.config.SSHSocksDNS == "local" {
+			resolved, err := app.resolveAddr(ctx, addr)
+			if err != nil {
+				return nil, err
+			}
+			targetAddr = resolved
+		}
+
+		if contextDialer != nil {
+			return contextDialer.DialContext(ctx, network, targetAddr)
+		}
+
+		type dialResult struct {
+			conn net.Conn
+			err  error
+		}
+		resultCh := make(chan dialResult, 1)
+		go func() {
+			conn, err := dialer.Dial(network, targetAddr)
+			resultCh <- dialResult{conn: conn, err: err}
+		}()
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case res := <-resultCh:
+			return res.conn, res.err
+		}
+	}
+}
+
+func (app *Application) resolveAddr(ctx context.Context, addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr, nil
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return addr, nil
+	}
+
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	if len(ips) == 0 {
+		return "", fmt.Errorf("no IPs found for host: %s", host)
+	}
+	return net.JoinHostPort(ips[0].IP.String(), port), nil
 }
 
 // setupSignalHandler configures OS signal handling.
@@ -166,28 +237,33 @@ func (app *Application) checkTraffic() bool {
 		app.logger.Error("Traffic check failed", "error", err)
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			app.logger.Error("Failed to close response body", "error", err)
+		}
+	}()
 
-	return resp.StatusCode == http.StatusOK
+	return resp.StatusCode >= 200 && resp.StatusCode < 400
 }
 
 // checkPort verifies if the proxy port is available.
 func (app *Application) checkPort() bool {
-	conn, err := net.DialTimeout("tcp", app.config.ProxyHost, app.config.PortCheckTimeout)
+	conn, err := net.DialTimeout("tcp", app.config.proxyHost, app.config.PortCheckTimeout)
 	if err != nil {
-		app.logger.Error("Proxy port unavailable", "host", app.config.ProxyHost, "error", err)
+		app.logger.Error("Proxy port unavailable", "host", app.config.proxyHost, "error", err)
 		return false
 	}
-	conn.Close()
+	if err := conn.Close(); err != nil {
+		app.logger.Error("Failed to close proxy connection", "error", err)
+	}
 	return true
 }
 
 // startSSH starts the SSH tunnel process.
 func (app *Application) startSSH() error {
 	app.sshMutex.Lock()
-	defer app.sshMutex.Unlock()
-
 	if app.sshProcess != nil && app.isProcessRunning(app.sshProcess) {
+		app.sshMutex.Unlock()
 		app.logger.Info("SSH process is already running")
 		return nil
 	}
@@ -198,13 +274,16 @@ func (app *Application) startSSH() error {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
+		app.sshMutex.Unlock()
 		return fmt.Errorf("failed to start SSH: %w", err)
 	}
 
 	app.sshProcess = cmd
+	app.sshMutex.Unlock()
 
 	// Verify the tunnel is ready
 	if !app.waitForTunnelReady() {
+		app.stopSSH()
 		return fmt.Errorf("tunnel failed to become ready")
 	}
 
@@ -237,17 +316,34 @@ func (app *Application) stopSSH() {
 		return
 	}
 
-	app.logger.Info("Stopping SSH process")
-	if err := app.sshProcess.Process.Signal(syscall.SIGTERM); err != nil {
+	cmd := app.sshProcess
+	app.logger.Info("Stopping SSH process", "pid", cmd.Process.Pid)
+
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		app.logger.Error("Failed to send SIGTERM", "error", err)
-		if err := app.sshProcess.Process.Kill(); err != nil {
-			app.logger.Error("Failed to kill process", "error", err)
-		}
 	}
 
-	_, err := app.sshProcess.Process.Wait()
-	if err != nil {
-		app.logger.Error("Error waiting for process", "error", err)
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	termTimer := time.NewTimer(5 * time.Second)
+	defer termTimer.Stop()
+
+	select {
+	case err := <-waitCh:
+		if err != nil {
+			app.logger.Error("Error waiting for process", "error", err)
+		}
+	case <-termTimer.C:
+		app.logger.Warn("SSH process did not exit, killing", "pid", cmd.Process.Pid)
+		if err := cmd.Process.Kill(); err != nil {
+			app.logger.Error("Failed to kill process", "error", err)
+		}
+		if err := <-waitCh; err != nil {
+			app.logger.Error("Error waiting for process after kill", "error", err)
+		}
 	}
 
 	app.sshProcess = nil
@@ -256,7 +352,7 @@ func (app *Application) stopSSH() {
 // createPIDFile creates the PID file.
 func (app *Application) createPIDFile() error {
 	pidFile := app.config.getPortSpecificPIDFile()
-	
+
 	if _, err := os.Stat(pidFile); err == nil {
 		content, err := os.ReadFile(pidFile)
 		if err != nil {
@@ -270,12 +366,13 @@ func (app *Application) createPIDFile() error {
 
 		if process, err := os.FindProcess(pid); err == nil {
 			if err = process.Signal(syscall.Signal(0)); err == nil {
-				_, port, _ := net.SplitHostPort(app.config.ProxyHost)
-				return fmt.Errorf("another instance is already running on port %s with PID %d", port, pid)
+				return fmt.Errorf("another instance is already running on port %s with PID %d", app.config.proxyPort, pid)
 			}
 		}
 
-		os.Remove(pidFile)
+		if err := os.Remove(pidFile); err != nil {
+			return fmt.Errorf("failed to remove stale PID file: %w", err)
+		}
 	}
 
 	return os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0644)
@@ -291,4 +388,9 @@ func (app *Application) cleanup() {
 	}
 
 	app.logger.Info("Application shutdown complete")
+	if app.logFile != nil {
+		if err := app.logFile.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "Failed to close log file:", err)
+		}
+	}
 }

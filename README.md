@@ -1,46 +1,8 @@
 # SSH Tunnel Manager
 
-![GitHub](https://img.shields.io/badge/go-%3E%3D1.24-blue)
-![GitHub](https://img.shields.io/badge/license-MIT-green)
+Persistent SSH SOCKS5 tunnel with health checks and auto-restart.
 
-A robust SSH tunnel manager that maintains a persistent SOCKS5 proxy connection with automatic reconnection capabilities.
-
-## Features
-
-- 🛡️ Persistent SSH tunnel with SOCKS5 proxy
-- 🔄 Automatic reconnection on failure
-- 🚦 Health checking and monitoring
-- ⚡ Graceful shutdown handling
-- 🔧 Configurable via environment variables
-- 📊 Structured JSON logging
-- 🚀 **Multi-instance support** - Run multiple tunnels on different ports simultaneously
-
-## How It Works
-
-The application establishes an SSH tunnel with dynamic port forwarding (SOCKS5 proxy) and continuously monitors its health by:
-
-1. Checking if the proxy port is available
-2. Making test requests through the tunnel
-3. Automatically restarting the tunnel if any checks fail
-4. Handling OS signals for graceful shutdown
-
-## Quick Start
-
-### Prerequisites
-
-- Go 1.24+
-- SSH client installed
-- SSH access to remote server
-
-### Installation
-
-```bash
-git clone https://github.com/your-repo/ssh-tunnel.git
-cd ssh-tunnel
-go build
-```
-
-### Basic Usage
+## Quick start
 
 ```bash
 export SSH_TUNNEL_REMOTE_ADDRESS=user@example.com
@@ -49,140 +11,34 @@ export SSH_TUNNEL_REMOTE_ADDRESS=user@example.com
 
 ## Configuration
 
-All configuration is done through environment variables:
+Required:
+- `SSH_TUNNEL_REMOTE_ADDRESS` (user@host)
 
-### Required Variables
+Common optional:
+- `SSH_TUNNEL_BIND_HOST` (default `127.0.0.1:8080`)
+- `SSH_TUNNEL_REMOTE_PORT` (default `2212`)
+- `SSH_TUNNEL_MAIN_LOOP_SLEEP_SEC` (default `15s`, Go duration)
+- `SSH_TUNNEL_PORT_CHECK_TIMEOUT_SEC` (default `4s`, Go duration)
+- `SSH_TUNNEL_LOG_STDOUT` (default `false`)
+- `SSH_TUNNEL_SOCKS_DNS` (`local` or `remote`, default `local`)
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `SSH_TUNNEL_REMOTE_ADDRESS` | SSH server address (user@host) | `user@example.com` |
+Advanced:
+- `SSH_TUNNEL_TCP_KEEPALIVE` (default `true`)
+- `SSH_TUNNEL_SERVER_ALIVE_INTERVAL` (default `15`)
+- `SSH_TUNNEL_CONNECT_TIMEOUT` (default `10`)
+- `SSH_TUNNEL_STRICT_HOST_CHECKING` (default `false`)
+- `SSH_TUNNEL_PID_FILE` (default `ssh-tunnel.pid`)
+- `SSH_TUNNEL_LOG_FILE` (default `ssh-tunnel.log`)
 
-### Optional Variables
+## Multiple instances
 
-**Application Settings:**
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SSH_TUNNEL_HOST` | `localhost:8080` | SOCKS5 proxy host:port |
-| `SSH_TUNNEL_MAIN_LOOP_SLEEP_SEC` | `15` | Health check interval (seconds) |
-| `SSH_TUNNEL_PORT_CHECK_TIMEOUT_SEC` | `4` | Port check timeout (seconds) |
-| `SSH_TUNNEL_PID_FILE` | `ssh-tunnel.pid` | PID file location |
-| `SSH_TUNNEL_LOG_FILE` | `ssh-tunnel.log` | Log file location |
-
-**SSH Settings:**
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SSH_TUNNEL_REMOTE_PORT` | `2212` | SSH server port |
-| `SSH_TUNNEL_BIND_HOST` | `0.0.0.0:8080` | Local bind address |
-| `SSH_TUNNEL_SERVER_ALIVE_INTERVAL` | `15` | Keepalive interval |
-| `SSH_TUNNEL_CONNECT_TIMEOUT` | `10` | Connection timeout |
-| `SSH_TUNNEL_STRICT_HOST_CHECKING` | `false` | Enable strict host checking |
-
-### Example Configuration
+Use different ports in `SSH_TUNNEL_BIND_HOST`. Log/PID files are suffixed with the port (e.g. `ssh-tunnel-8080.log`).
 
 ```bash
-# Required
-export SSH_TUNNEL_REMOTE_ADDRESS=user@example.com
-
-# Optional overrides
-export SSH_TUNNEL_REMOTE_PORT=2222
-export SSH_TUNNEL_BIND_HOST=127.0.0.1:9090
-export SSH_TUNNEL_MAIN_LOOP_SLEEP_SEC=30
+SSH_TUNNEL_REMOTE_ADDRESS=user@example.com SSH_TUNNEL_BIND_HOST=127.0.0.1:8080 ./ssh-tunnel &
+SSH_TUNNEL_REMOTE_ADDRESS=user@example.com SSH_TUNNEL_BIND_HOST=127.0.0.1:9090 ./ssh-tunnel &
 ```
-
-## Running Multiple Instances
-
-The application supports running multiple instances simultaneously on different ports. Each instance automatically creates port-specific PID and log files to avoid conflicts.
-
-### Multi-Instance Example
-
-**Terminal 1 - Instance on port 8080:**
-```bash
-export SSH_TUNNEL_REMOTE_ADDRESS=user@example.com
-export SSH_TUNNEL_HOST=localhost:8080
-export SSH_TUNNEL_BIND_HOST=0.0.0.0:8080
-./ssh-tunnel
-```
-
-**Terminal 2 - Instance on port 9090:**
-```bash
-export SSH_TUNNEL_REMOTE_ADDRESS=user@example.com
-export SSH_TUNNEL_HOST=localhost:9090
-export SSH_TUNNEL_BIND_HOST=0.0.0.0:9090
-./ssh-tunnel
-```
-
-### Port-Specific Files
-
-When running multiple instances, the application automatically creates port-specific files:
-
-- **PID Files**: `ssh-tunnel-8080.pid`, `ssh-tunnel-9090.pid`
-- **Log Files**: `ssh-tunnel-8080.log`, `ssh-tunnel-9090.log`
-
-This allows each instance to:
-- Track its own process independently
-- Maintain separate logs for easier debugging
-- Prevent conflicts between instances
-- Allow graceful shutdown of individual instances
-
-## Running as a Service
-
-### systemd Service Example
-
-Create `/etc/systemd/system/ssh-tunnel.service`:
-
-```ini
-[Unit]
-Description=SSH Tunnel Manager
-After=network.target
-
-[Service]
-Environment="SSH_TUNNEL_REMOTE_ADDRESS=user@example.com"
-Environment="SSH_TUNNEL_REMOTE_PORT=2222"
-ExecStart=/path/to/ssh-tunnel
-Restart=always
-User=youruser
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then enable and start the service:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable ssh-tunnel
-sudo systemctl start ssh-tunnel
-```
-
-## Monitoring
-
-The application writes structured JSON logs to the specified log file. Example log entry:
-
-```json
-{
-  "time": "2023-11-15T12:34:56Z",
-  "level": "INFO",
-  "msg": "Starting SSH process",
-  "pid": 12345,
-  "args": ["ssh", "-N", "-C", "-D", "0.0.0.0:8080", "user@example.com"]
-}
-```
-
-## Troubleshooting
-
-1. **Connection failures**:
-   - Verify SSH access works manually
-   - Check firewall settings
-   - Enable debug logging by setting `LOG_LEVEL=debug`
-
-2. **Port in use**:
-   - Change `SSH_TUNNEL_BIND_HOST` to use a different port
-   - Verify no other instances are running
-
-3. **Permission issues**:
-   - Ensure user has write access to PID and log files
-   - Verify SSH keys are properly configured
 
 ## License
 
-MIT License.
+MIT
