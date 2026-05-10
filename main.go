@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,23 +11,27 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 
 	"golang.org/x/net/proxy"
 )
 
+// Application is the root state of the ssh-tunnel service.
 type Application struct {
-	config        *config
-	httpTransport *http.Transport
-	logger        *slog.Logger
-	logFile       *os.File
-	sshProcess    *exec.Cmd
-	sshMutex      sync.RWMutex
-	shutdownChan  chan struct{}
+	config        *config         // parsed configuration
+	httpTransport *http.Transport // SOCKS5-based transport for traffic checks
+	logger        *slog.Logger    // structured logger
+	logFile       *os.File        // log file handle
+	sshProcess    *exec.Cmd       // current SSH child process
+	sshMutex      sync.RWMutex    // protects sshProcess
+	shutdownChan  chan struct{}   // closed on shutdown signal
 }
+
+// checkProcessAlive points to the platform process check and is replaced in tests.
+var checkProcessAlive = isProcessAlive
 
 func main() {
 	// Initialize configuration
@@ -64,8 +67,8 @@ func (app *Application) initialize() error {
 	app.logger = logger
 
 	// Create PID file
-	if err := app.createPIDFile(); err != nil {
-		return fmt.Errorf("PID file creation failed: %w", err)
+	if pidErr := app.createPIDFile(); pidErr != nil {
+		return fmt.Errorf("PID file creation failed: %w", pidErr)
 	}
 
 	// Setup HTTP transport
@@ -83,8 +86,8 @@ func (app *Application) initialize() error {
 
 // createLogger initializes the application logger.
 func (app *Application) createLogger() (*slog.Logger, error) {
-	logFile := app.config.getPortSpecificLogFile()
-	file, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	logFile := filepath.Clean(app.config.getPortSpecificLogFile())
+	file, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
@@ -112,11 +115,12 @@ func (app *Application) createHTTPTransport() (*http.Transport, error) {
 	dialContext := app.makeSocksDialContext(dialer)
 
 	return &http.Transport{
-		DialContext:     dialContext,
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: dialContext,
 	}, nil
 }
 
+// makeSocksDialContext wraps a SOCKS5 dialer into a context-aware DialContext function.
+// When SOCKS DNS mode is "local", it resolves hostnames before passing to the proxy.
 func (app *Application) makeSocksDialContext(dialer proxy.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	var contextDialer proxy.ContextDialer
 	if cd, ok := dialer.(proxy.ContextDialer); ok {
@@ -156,10 +160,12 @@ func (app *Application) makeSocksDialContext(dialer proxy.Dialer) func(ctx conte
 	}
 }
 
+// resolveAddr resolves the hostname in addr to an IP address.
+// If addr is not in host:port format or is already an IP, it is returned as-is.
 func (app *Application) resolveAddr(ctx context.Context, addr string) (string, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return addr, nil
+	host, port, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		return addr, nil //nolint:nilerr // intentional: non-host:port address is passed through as-is
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		return addr, nil
@@ -178,7 +184,7 @@ func (app *Application) resolveAddr(ctx context.Context, addr string) (string, e
 // setupSignalHandler configures OS signal handling.
 func (app *Application) setupSignalHandler() {
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, shutdownSignals()...)
 
 	go func() {
 		sig := <-sigCh
@@ -226,7 +232,7 @@ func (app *Application) checkTraffic() bool {
 		Timeout:   10 * time.Second,
 	}
 
-	req, err := http.NewRequest("HEAD", "https://google.com", nil)
+	req, err := http.NewRequest(http.MethodHead, "https://google.com", nil)
 	if err != nil {
 		app.logger.Error("Failed to create request", "error", err)
 		return false
@@ -269,7 +275,7 @@ func (app *Application) startSSH() error {
 	}
 
 	app.logger.Info("Starting SSH process")
-	cmd := exec.Command("ssh", app.config.serializeSSHOptions()...)
+	cmd := exec.Command("ssh", app.config.serializeSSHOptions()...) //nolint:gosec
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -319,8 +325,8 @@ func (app *Application) stopSSH() {
 	cmd := app.sshProcess
 	app.logger.Info("Stopping SSH process", "pid", cmd.Process.Pid)
 
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		app.logger.Error("Failed to send SIGTERM", "error", err)
+	if err := terminateProcess(cmd.Process); err != nil {
+		app.logger.Error("Failed to terminate process", "error", err)
 	}
 
 	waitCh := make(chan error, 1)
@@ -351,7 +357,7 @@ func (app *Application) stopSSH() {
 
 // createPIDFile creates the PID file.
 func (app *Application) createPIDFile() error {
-	pidFile := app.config.getPortSpecificPIDFile()
+	pidFile := filepath.Clean(app.config.getPortSpecificPIDFile())
 
 	if _, err := os.Stat(pidFile); err == nil {
 		content, err := os.ReadFile(pidFile)
@@ -364,10 +370,12 @@ func (app *Application) createPIDFile() error {
 			return fmt.Errorf("failed to parse PID: %w", err)
 		}
 
-		if process, err := os.FindProcess(pid); err == nil {
-			if err = process.Signal(syscall.Signal(0)); err == nil {
-				return fmt.Errorf("another instance is already running on port %s with PID %d", app.config.proxyPort, pid)
-			}
+		alive, err := checkProcessAlive(pid)
+		if err != nil {
+			return fmt.Errorf("failed to check PID %d: %w", pid, err)
+		}
+		if alive {
+			return fmt.Errorf("another instance is already running on port %s with PID %d", app.config.proxyPort, pid)
 		}
 
 		if err := os.Remove(pidFile); err != nil {
@@ -375,7 +383,7 @@ func (app *Application) createPIDFile() error {
 		}
 	}
 
-	return os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0644)
+	return os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0600)
 }
 
 // cleanup performs application cleanup tasks.

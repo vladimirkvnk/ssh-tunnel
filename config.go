@@ -10,6 +10,7 @@ import (
 	"github.com/caarlos0/env/v11"
 )
 
+// config holds all application settings parsed from SSH_TUNNEL_* environment variables.
 type config struct {
 	// Main config
 	MainLoopSleep    time.Duration `env:"MAIN_LOOP_SLEEP_SEC" envDefault:"15s"`
@@ -33,6 +34,7 @@ type config struct {
 	proxyPort string
 }
 
+// newConfig parses environment variables and returns a validated config.
 func newConfig() (*config, error) {
 	var cfg config
 	opts := env.Options{
@@ -50,6 +52,7 @@ func newConfig() (*config, error) {
 	return &cfg, nil
 }
 
+// validate checks config values and populates derived fields.
 func (c *config) validate() error {
 	if err := c.deriveProxyHost(); err != nil {
 		return err
@@ -79,6 +82,7 @@ func (c *config) validate() error {
 	return nil
 }
 
+// deriveProxyHost parses SSHBindHost into proxyHost/proxyPort, normalizing wildcard addresses to loopback.
 func (c *config) deriveProxyHost() error {
 	host, port, err := net.SplitHostPort(c.SSHBindHost)
 	if err != nil {
@@ -103,9 +107,8 @@ func (c *config) deriveProxyHost() error {
 }
 
 // getPortSpecificPIDFile returns a PID file name that includes the proxy port
-// to allow multiple instances running on different ports
+// to allow multiple instances running on different ports.
 func (c *config) getPortSpecificPIDFile() string {
-	// Create port-specific PID file name
 	// e.g., "ssh-tunnel.pid" becomes "ssh-tunnel-8080.pid"
 	if c.PIDFile == "ssh-tunnel.pid" {
 		return fmt.Sprintf("ssh-tunnel-%s.pid", c.proxyPort)
@@ -121,9 +124,8 @@ func (c *config) getPortSpecificPIDFile() string {
 	return fmt.Sprintf("%s-%s", c.PIDFile, c.proxyPort)
 }
 
-// getPortSpecificLogFile returns a log file name that includes the proxy port
+// getPortSpecificLogFile returns a log file name that includes the proxy port.
 func (c *config) getPortSpecificLogFile() string {
-	// Create port-specific log file name
 	// e.g., "ssh-tunnel.log" becomes "ssh-tunnel-8080.log"
 	if c.LogFile == "ssh-tunnel.log" {
 		return fmt.Sprintf("ssh-tunnel-%s.log", c.proxyPort)
@@ -139,6 +141,7 @@ func (c *config) getPortSpecificLogFile() string {
 	return fmt.Sprintf("%s-%s", c.LogFile, c.proxyPort)
 }
 
+// serializeSSHOptions builds the SSH command-line arguments from config.
 func (c *config) serializeSSHOptions() []string {
 	opts := make([]string, 0, 16)
 
